@@ -1,6 +1,6 @@
 # Unsloth Puzzle Submissions 🚀
 
-This repository contains my solutions to Unsloth's machine learning puzzles. I'm currently working on these challenges as part of my journey towards the **ML Software Engineering Intern** role.
+This repository contains my solutions to Unsloth's machine learning puzzles. I'm currently working on these challenges targeting the **ML Intern** role.
 
 ## 📌 Submissions
 
