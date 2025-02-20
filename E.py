@@ -15,10 +15,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 ############################################
@@ -203,7 +203,7 @@ def memory_efficient_cross_entropy_with_transform(
 # 4. Test 1: Gradient Equivalence Test
 ###########################################################
 def test_gradient_equivalence():
-    """Test that the memory-efficient CE produces equivalent gradients to the normal full-logits version."""
+    """Test that the memory-efficient CE produces equivalent gradients to the standard full-logits version."""
     print("Testing gradient equivalence on moderate-sized inputs...")
     bsz, qlen, hd, vocab = 2, 256, 64, 1024
 
@@ -287,7 +287,6 @@ def test_large_input():
     vocab = 128 * 1024  # 131072
     available_vram_gb = 14.0  # Allow wiggle room on a T4 (15GB total, ~14GB available)
     bytes_per_element = 4  # for float32
-    # Compute safe chunk size using the empirical safety factor.
     computed_chunk_size = compute_chunk_size(
         vocab, available_vram_gb, bytes_per_element, safety_factor=28
     )
@@ -336,7 +335,6 @@ def test_standard_vs_memory_efficient():
         loss = F.cross_entropy(logits, targets.view(-1))
         return loss
 
-    # Measure standard approach.
     torch.cuda.reset_peak_memory_stats()
     loss_standard = standard_ce_loss(X, linear, T)
     loss_standard.backward()
@@ -344,13 +342,11 @@ def test_standard_vs_memory_efficient():
     print(f"Standard approach loss: {loss_standard.item():.6f}")
     print_max_vram_usage("Standard approach: ")
 
-    # Reset gradients.
     X.grad = None
     linear.weight.grad = None
     if linear.bias is not None:
         linear.bias.grad = None
 
-    # Memory-efficient approach with a chunk size (e.g., 512 tokens).
     torch.cuda.reset_peak_memory_stats()
     chunk_size = 512
     loss_mem = memory_efficient_cross_entropy_with_transform(
@@ -366,11 +362,54 @@ def test_standard_vs_memory_efficient():
 
 
 ###########################################################
-# 7. Main execution with cache clearing
+# 7. Test 4: LLaMA-1B Loss Equivalence Test
+###########################################################
+def test_llama_1b_loss():
+    """
+    Load the LLaMA-1B model from the unsloth repository,
+    run a forward pass to obtain the final hidden states, and compare the standard
+    cross-entropy loss with our memory-efficient version on the model's output head.
+    """
+    print(
+        "\nTesting LLaMA-1B training loss equivalence using unsloth/Llama-3.2-1B-Instruct:"
+    )
+    checkpoint = "unsloth/Llama-3.2-1B-Instruct"
+    model = AutoModelForCausalLM.from_pretrained(checkpoint).cuda().half()
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    model.train()
+
+    input_text = "The quick brown fox jumps over the lazy dog."
+    inputs = tokenizer(input_text, return_tensors="pt").to("cuda")
+    outputs = model(**inputs, output_hidden_states=True)
+    hidden_states = outputs.hidden_states[-1]  # shape: [batch, seq_len, hidden_dim]
+    labels = inputs["input_ids"]
+
+    B, Q, D = hidden_states.shape
+
+    logits_standard = model.lm_head(hidden_states.view(-1, D)).float()
+    loss_standard = F.cross_entropy(logits_standard, labels.view(-1))
+    loss_mem = memory_efficient_cross_entropy_with_transform(
+        hidden_states.half(), model.lm_head.half(), labels
+    )
+
+    print(f"LLaMA-1B Standard loss: {loss_standard.item():.6f}")
+    print(f"LLaMA-1B Memory-efficient loss: {loss_mem.item():.6f}")
+    print(
+        "Loss equivalence:",
+        torch.allclose(
+            torch.tensor(loss_standard.item()), torch.tensor(loss_mem.item()), atol=1e-4
+        ),
+    )
+
+
+###########################################################
+# 8. Main execution with cache clearing
 ###########################################################
 if __name__ == "__main__":
     torch.cuda.empty_cache()
     test_gradient_equivalence()
     test_large_input()
     test_standard_vs_memory_efficient()
+    # Uncomment the following line to run the LLaMA-1B test (ensure you have the checkpoint).
+    test_llama_1b_loss()
     torch.cuda.empty_cache()
